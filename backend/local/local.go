@@ -272,6 +272,14 @@ enabled, rclone will no longer update the modtime after copying a file.`,
 				Advanced: true,
 			},
 			{
+				Name: "directio",
+				Help: `write files with o_sync flag.
+
+Normally rclone create file without o_sync flag, on some fuse filesystem, use o_sync to get better performance io.`,
+				Default:  false,
+				Advanced: true,
+			},
+			{
 				Name: "time_type",
 				Help: `Set what kind of time is returned.
 
@@ -333,6 +341,7 @@ type Options struct {
 	NoPreAllocate     bool                 `config:"no_preallocate"`
 	NoSparse          bool                 `config:"no_sparse"`
 	NoSetModTime      bool                 `config:"no_set_modtime"`
+	Directio          bool                 `config:"directio"`
 	TimeType          timeType             `config:"time_type"`
 	Enc               encoder.MultiEncoder `config:"encoding"`
 	NoClone           bool                 `config:"no_clone"`
@@ -368,6 +377,7 @@ type Object struct {
 	hashes  map[hash.Type]string // Hashes
 	// these are read only and don't need the mutex held
 	translatedLink bool // Is this object a translated link
+	directIO       bool // is this object use directio
 }
 
 // Directory represents a local filesystem directory
@@ -429,6 +439,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		f.features.Copy = nil
 	}
 
+	if opt.Directio {
+		// enable directio if the option is set
+		f.features.DirectIO = true
+	}
 	// Check to see if this points to a file
 	fi, err := f.lstat(f.root)
 	if err == nil {
@@ -528,6 +542,7 @@ func (f *Fs) newObject(remote string) *Object {
 		remote:         remote,
 		path:           localPath,
 		translatedLink: translatedLink,
+		directIO:       f.opt.Directio,
 	}
 }
 
@@ -1381,8 +1396,16 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	// If the object is a regular file, create it.
 	// If it is a translated link, just read in the contents, and
 	// then create a symlink
+	var mode int
+
+	if o.directIO {
+		mode = os.O_WRONLY | os.O_CREATE | os.O_TRUNC | os.O_SYNC
+	} else {
+		mode = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+
 	if !o.translatedLink {
-		f, err := file.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+		f, err := file.OpenFile(o.path, mode, 0666)
 		if err != nil {
 			if runtime.GOOS == "windows" && os.IsPermission(err) {
 				// If permission denied on Windows might be trying to update a
